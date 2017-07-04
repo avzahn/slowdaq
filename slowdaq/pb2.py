@@ -1,148 +1,101 @@
 from . netstring import *
 from . netarray import *
-from . server import *
+from . stream import *
 
 import os
 import json
 import datetime
 
 class Publisher(Server):
-    
-    def __init__(self, name, agg_addr, agg_port):
+    """
+    """
+    def __init__(self,name, agg_addr, agg_port):
         
-        Server.__init__(self)       
-        
-        # need to store messages to send to the aggregator whether or not it's
-        # connected every time we see a call to publish()
-        self.agg_addr = agg_addr
-        self.agg_port = agg_port
-
-        try:
-            # Important to make sure that all disconnects set this to None
-            self.agg_sock = self.connectTCP(agg_addr, agg_port)
-            # queue for messages to aggregator that can't be put through a
-            # socket yet. Only used if there is no Socket for the aggregator
-            # connection.
-            self.aq = None
-        except:
-            # If None, self.select will attempt to create it once per call.
-            self.agg_sock = None
-            # Important to make sure that all aggregator disconnects make sure
-            # this is an appropriate non None
-            self.aq = deque()
-        
-        self.sockname = self.listenTCP(
-            socket.gethostbyname(socket.gethostname()),0)        
-        self.pid = os.getpid()
-        
-        # messages recieved from the aggregator end up here        
-        self.inbox = deque([],maxlen=256)
+        Server.__init__(self)
         
         self.name = name
+        self.agg_addr = agg_addr
+        self.agg_port = agg_port
+        self.pid = os.getpid()
         
-        # time of last heartbeat signal sent to aggregator. A new signal is sent
-        # on self.select() if the last one was sent more than fifteen seconds
-        # earlier
-        self.t_last_pulse = now()
+        self.add_connection(agg_addr,agg_port)
         
+        # listen on any open port
+        self.add_listener()
         
-    def publish_data(self,d):
+        # all messages sent to this instance end up here
+        self.inbox = []
         
+        self.pulse()
+
+    def pack(self,d):
+        """
+        Add key-value pairs to a dict d so as to be intelligible to an
+        aggregator recieving it over the network, and return it as sendable JSON 
+        """
+        d['source'] = [self.name, self.pid]
         d['event'] = 'data'
-        
-        # TODO: consider a more concise protocol for identifying the source on
-        # the aggregator side
-        d['source'] = [self.name,self.pid]
-        
         apply_timestamp(d)
+        return json.dumps(d)
         
-        self.publish(json.dumps(d))
-        
-    
-    def publish(self,msg):
-        """
-        Store msg for output on all Socket objects in self.listening. If there
-        is no Socket object avaiable for the aggregator, queue message in
-        self.aq.
-        """
-        
-        if self.aq != None:
-            # None if and only if aggregator isn't connected yet
-            self.aq.appendleft(msg)
-        
-        for sock in self.all_sockets(listening=False):
-            sock.push(msg)
-
-    def on_writable(self,sock):
-        if sock in self.all_sockets(listening=False):
-            sock.transmit()
-                    
-    def on_fetch_decode(self,sock,msgs):
-        for msg in msgs:
-            self.inbox.appendleft(msg)
-
-    def on_disconnect(sock,msgs):
-        
-        if sock is self.agg_sock:            
-            self.aq = self.agg_sock.queue
-            self.agg_sock = None
-            
     def pulse(self):
         """
-        publish() a heartbeat signal
+        queue a heartbeat signal to send to all clients
         """
-        
         d = {'event':'pulse',
              'name':self.name,
              'pid':self.pid}
-             
         apply_timestamp(d)
-             
-        self.publish(json.dumps(d))
-
-    def select(self,timeout=0.0):
+        self.queue(json.dumps(d))
+        self.t_last_pulse = now()
+        
+    def handle_recv(self,stream,msgs):
+        self.inbox += msgs
+        
+    def serve(self,timeout=0):
         
         # decide whether or not to create and publish a heartbeat
         t = now()
         if t - self.t_last_pulse > datetime.timedelta(seconds=15):
             self.pulse()
-            self.last_pulse = t
         
-        # try to reconnect to the aggregator if necessary
-        if self.agg_sock == None:
-            try:
-                self.agg_sock = self.connectTCP(agg_addr, agg_port)
-                self.agg_sock.queue = self.aq
-                self.aq = None
-                
-            except:
-                pass
-                
-        Server.select(self,timeout)
+        Server.serve(self,timeout)
         
 class Aggregator(Server):
-        
+    """
+    """
     def __init__(self,addr,port,fname):
         
         Server.__init__(self)
         
-        self.listenTCP(addr,port)
-        # TODO: create a new file automatically as files get too large
+        self.add_listener(addr,port)
+        
         self.fname = fname
         self.data = []
         self.pulses = []
+        
+        # setup an initial snapshot
         self.snapshot = {'event':'snapshot','log':fname,'entries':{}}
         apply_timestamp(self.snapshot)
+    
+    def dump(self):
+        """
+        Append everything in self.data to a file.
         
-    def on_accept(self,sock):
-        sock.push(json.dumps(self.snapshot))
-        
-    def on_fetch_decode(self,sock,msgs):
+        TODO: Support new files as old ones become too large
+        TODO: Decide when it is appropriate to a dump a snapshot
+        """
+        with File(self.fname,'a') as f:
+            while len(self.data) > 0:
+                msg = self.data.pop()
+                f.write(msg)
+            f.flush()
+    
+    def handle_recv(self,stream,msgs):
         
         do_new_snapshot = False
         
         for msg in msgs:
-            
             try:
                 m = json.loads(msg)
             except:
@@ -154,28 +107,16 @@ class Aggregator(Server):
             if m['event'] == 'request_snapshot':
                 do_new_snapshot = True
                 
-                
             if m['event'] == 'pulse':
-                m['addr'] = sock.getpeername()[0]
-                m['port'] = sock.getpeername()[1]
+                m['addr'], m['port'] = stream.remote_location
                 self.pulses.append(m)
                 
         if do_new_snapshot:
             snapshot = self.update_snapshot()
-            sock.push(snapshot)
-        
-    def dump(self):
-        
-        with File(self.fname,'a') as f:
-            while len(self.data) > 0:
-                msg = self.data.pop()
-                f.write(msg)
-                   
-            # TODO: decide when it is appropriate to dump a snapshot
-            #f.write(json.dumps(self.snapshot))
-            f.flush()
+            stream.queue(snapshot)
             
-        
+    def handle_accept(self,stream):
+        stream.queue(json.dumps(self.snapshot))
             
     def update_snapshot(self):
         """
@@ -201,6 +142,7 @@ class Aggregator(Server):
         # purge anything older than three minutes from the snapshot
         
         t_cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=3)
+        remove = []
         
         for name in entries:            
             t_snap = from_timestamp(entries[name]['systime'])
@@ -210,109 +152,95 @@ class Aggregator(Server):
         for name in remove:
             del entries[name]
             
-        snapshot['event'] = 'snapshot'
-        snapshot['log'] = self.fname
-        apply_timestamp(snapshot)
+        self.snapshot['event'] = 'snapshot'
+        self.snapshot['log'] = self.fname
+        apply_timestamp(self.snapshot)
         
-        return json.dumps(snapshot)   
-            
-    def publish(self,msg):        
-        for sock in self.all_sockets(listening=False):
-            sock.push(msg)
+        return json.dumps(self.snapshot)          
 
-    def on_writable(self,sock):
-        if sock in self.all_sockets(listening=False):
-            sock.transmit()
-    
 class Subscriber(Server):
+    """
     
-    def __init__(self,agg_addr,agg_port):
-        
-        Server.__init__(self)
-        
-        self.inbox = deque([],maxlen=512)
+    It is not recommended that a Subscriber be used as a data archiver.
+    Subscribers are more prone to data loss than Aggregators and Archivers
+    because they are one level further removed from the Publishers. When a
+    Publisher's connection to a Subscriber fails, the Publisher has no
+    responsibility to buffer for the Subscriber any data generated until the
+    connection is reestablished. Further, the Subscriber must reestablish that
+    connection itself by taking potentially tens of seconds to get a new
+    snapshot from the Aggregator.
+    """
+    
+    def __init__(self, agg_addr, agg_port):
         
         self.agg_addr = agg_addr
         self.agg_port = agg_port
-        self.agg_sock = None
         
-        self.snapshot = None
+        self.aggregator = self.add_connection(agg_addr,agg_port)
         
-        self.connect_to_aggregator()
+        self.snapshots = []
+        
+        # Will be filled with all data frames recieved. Up to the user to empty.
+        self.data = []
         
     def request_snapshot(self):
         d = {'event':'request_snapshot'}
-        if self.agg_sock != None:
-            self.agg_sock.push(json.dumps(d))    
-    
-    def connect_to_aggregator(self):
-        try:
-            self.agg_sock=self.connectTCP(agg_addr,agg_port)
-            self.request_snapshot()
-        except:
-            pass
-    
-    def subscribe(self):
+        self.aggregator.queue(json.dumps(d))
         
-        if self.snapshot == None:
-            return
+    def handle_recv(self,stream,msgs):
         
-        entries = self.snapshot['entries']
-        
-        for name in entries:
-            addr = entries[name]['addr']
-            port = entries[name]['port']
-            try:
-                self.connectTCP(addr,port)
-            except:
-                # TODO: decide on appropriate response if cannot connect
-                pass
-    
-    def on_disconnect(self,sock):
-        
-        if sock == self.agg_sock:
-            self.connect_to_aggregator()
-        
-    def on_writable(self,sock):
-        if sock in self.all_sockets(listening=False):
-            sock.transmit()
-
-    def on_fetch_decode(self,sock,msgs):
         for msg in msgs:
             
-            m = json.loads(msg)
-            if 'event' in m:
-                if m['event'] == 'snapshot':
-                    # TODO: possible issues if multiple snapshots waiting
-                    self.snapshot = m
-                    continue
+            try:
+                m = json.loads(msg)
+            except:
+                continue
+                
+            if m['event'] == 'snapshot':
+                self.snapshots.append(m)
             
-            self.inbox.appendleft(m)
-
-class Archiver(Publisher):
+            if m['event'] == 'data':
+                self.data.append(m)
+                
+    def snapshotdiff(self,s0,s1):
+        """
+        Return lists of addresses to add to and remove from snapshot s0 to form
+        snapshot s1.
+        
+        TODO: consider consolidating all the snapshot related work in this
+        module into a snapshot class
+        """
+        
+        addr0 = []
+        
+        for name in s0['entries']:
+            entry = s0['entries'][name]
+            addr0.append( (entry['port'],entry['addr']) )
+        
+        addr1 = []
+        
+        for name in s1['entries']:
+            entry = s1['entries'][name]
+            addr1.append( (entry['port'],entry['addr']) )
+            
+        addr0,addr1 = set(addr0),set(addr1)
+        
+        add = list(addr1-addr0)
+        remove = list(addr0-addr1)
+        
+        return add,remove
     
-    def __init__(self,agg_addr,agg_port,fname):
-        
-        Publisher.__init__(self,agg_addr,agg_port)
-        self.fname = fname
-        self.snapshot = None
-        
-    def rsync(self):
-        pass
-        
-    def dump(self):
-        
-        with File(self.fname,'a') as f:
-            while len(self.inbox) > 0:
-                msg = self.inbox.pop()
-                f.write(msg)
-            f.flush()
-            
-    def on_connect(self, sock):
-        
-        d= {'event':'request_snapshot'}
-        apply_timestamp(d)
-        msg = json.dumps(d)
-        sock.push(msg)
+    def handle_close(self,stream):
+        # if we lose a connection, it's safest to ask the aggregator if it's
+        # still there before attempting to reconnect
+        self.request_snapshot()
+        Server.handle_close(self,stream)
         
         
+    def apply_diff(self,add,remove):
+        pass      
+    
+    
+    
+class Archiver(Server):
+    pass

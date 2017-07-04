@@ -318,14 +318,20 @@ class Decoder(object):
             if msg == None:
                 break
                 
-    def get(self):
+    def get(self, ignore_errors = True):
         """
         Return all the message payloads decoded so far in order and forget them.
         Note that negative integers in the return value represent a number of
         bytes that don't conform to the netstring protocol.
-        """
+        """        
+        
         ret = self.msg
         self.msg = []
+        
+        if ignore_errors:
+            # remove integer values from the return list
+            ret = [ r for r in ret if not isinstance(r,int) ]        
+        
         return ret
         
 class File(object):
@@ -411,11 +417,11 @@ class Socket(object):
     reason. One nice side effect of this is that you can send before a connect
     completes and not worry about it.
     
-    The methods intended for the outside world to use are send_encoded,
-    fetch_decode, and get.
+    The most important methods intended for the outside world to use are
+    send_encoded, fetch_decode, and get.
     
     Rather than raising exceptions in the event of errors, this class will set
-    self.status.
+    self.err.
     """
     def __init__(self,*args,**kwargs):
         """
@@ -423,18 +429,75 @@ class Socket(object):
         arguments straight through.
         """
         
+        self.remote_addr = None
+        self.remote_port = None
+        
         if 'from_socket' in kwargs:
             self.sock = kwargs['from_socket']
+            try:
+                self.remote_addr, self.remote_port = self.getpeername()
+            except:
+                pass
         else:
             self.sock = socket.socket(*args)
-            
+
+        
+        self.args = args
+        
+        # inbound message queue will be here
         self.decoder = Decoder()
+        
+        # number of bytes to recv at once
         self.blocksize = 4096
+        
+        # outbound message queue
         self.queue = deque()
-        self.status = 'ok'
+                
+        self.host_addr = None
+        self.host_port = None
+        
+        
+        self.timeout = None
+        
+        #
+        # Extra fields to help other objects keep track of Sockets.
+        #
+        
+        self.persistent = False
+        self.err = None
+        
+        # current socket.socket status
+        self.status = None
+        
+        # self.status we intend to achieve
+        self.status_intent = None
+        
+    def resock(self):
+        self.sock.close()
+        self.decoder = Decoder()
+        
+        self.sock = socket.socket(*self.args)
+        self.sock.settimeout(self.timeout)
+        
+        self.err = None
+        self.status = None
+
        
-    def connect(self,*args,**kwargs):
-        return self.sock.connect(*args,**kwargs)
+    def connect(self,address=None):
+        
+        self.status_intent = 'connected'
+        
+        if address != None:
+            self.remote_addr,self.remote_port = address
+           
+        try:
+            ret =  self.sock.connect((self.remote_addr,self.remote_port))
+            self.status = 'connected'
+        except socket.error as e:
+            self.err = e.errno
+            ret = e
+                
+        return ret
        
     def fileno(self):
         return self.sock.fileno()
@@ -446,13 +509,19 @@ class Socket(object):
         self.queue.appendleft(msg)
         
     def settimeout(self,t):
+        self.timeout = t
         return self.sock.settimeout(t)
     
     def listen(self,*args):
-        return self.sock.listen(*args)
+        self.status_intent = 'listening'
+        ret = self.sock.listen(*args)
+        self.status = 'listening'
+        return ret
     
-    def bind(self,*args):
-        return self.sock.bind(*args)
+    def bind(self,address=None):
+        if address != None:
+            self.host_addr,self.host_port = address
+        return self.sock.bind((self.host_addr,self.host_port))
         
     def getsockname(self,*args):
         return self.sock.getsockname(*args)
@@ -478,6 +547,7 @@ class Socket(object):
 
     def close(self):
         self.sock.close()
+        self.status = 'closed'
         return self.queue
 
     def send_encoded(self,msg):
@@ -516,7 +586,10 @@ class Socket(object):
             try:
                 sent += self.sock.send(msg)
             except socket.error as e:
-                self.status = e.errno
+                self.err = e.errno
+                
+                print 'Socket: send_all: errno=%s'%(str(e.errno))
+                
                 break
             
         return sent
@@ -541,20 +614,23 @@ class Socket(object):
         asynchronous.
         """
         
-        status = 'ok'
-        
         while True:
             
             try:
                 data = self.recv(self.blocksize)
+                
+                print 'fetch_decode: data=',data
+                
+                
                 if data == '':
-                    status = 'closed'
+                    
+                    print 'fetch_decode: null found'
+                    
+                    self.status = 'closed'
                     break
             except:
                 break
-        
-        self.status = status
-        
+                
         return self.get()
     
     def get(self):
@@ -569,6 +645,9 @@ class Socket(object):
                             
     def accept(self):
         s,addr = self.sock.accept()
-        return Socket(from_socket=s),addr
+        s = Socket(from_socket=s)
+        s.status = 'accepted'
+        s.status_intent = 'accepted'
+        return s,addr
             
 

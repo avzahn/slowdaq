@@ -5,23 +5,22 @@ pub = Publisher('daq1','localhost',3141)
 
 
 j = 0
-
 while True:    
     
     # nothing is actually sent or recieved until we call this
-    pub.select()
+    pub.serve()
     
     
     # all messages addressed to us are now in pub.inbox
     
-    pub.publish_data({'j':j})
+    pub.queue(pub.pack({'j':j}))
+    
+    
+    j += 1
     
     
     if not j % 10:
-        pub.pulse()
+        print 'daq1:',j
         
-    
-    j += 1
-    print j
     time.sleep(1)
 
