@@ -81,7 +81,6 @@ def a32(data,blocksize=(1<<28)):
         
     return chk
 
-
 timestamp_fmt = '%Y-%m-%d:%H:%M:%S:%f'
 
 now = datetime.datetime.utcnow

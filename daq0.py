@@ -7,24 +7,32 @@ from slowdaq.pb2 import *
 from time import sleep
 
 # While pub will listen on a dynamically allocated TCP port, the aggregator
-# location must be known in advance.
+# location must be known in advance. Each publisher needs to have a unique name.
 pub = Publisher('daq0','localhost',3141)
 
 i = 0
 
-while True:    
-    
+while True:
+
     # nothing is actually sent or recieved until we call this
     pub.serve()
-    
-    # all messages addressed to us are now in pub.inbox. It's the user's
-    # responsibility to empty it to avoid memory problems    
-    pub.queue(pub.pack({'i':i}))
-    
-    i += 1
-    
-    if not i % 10:
-        print 'daq0:',i
-        
-    time.sleep(1)
 
+    # format data so that the aggregator can interpret it
+    data = pub.pack({'i':i})
+
+    # Recall this is only queued for sending, and won't be sent until the
+    # next serve().
+    pub.queue(data)
+
+    i += 1
+
+    if not i % 10:
+
+        while len(pub.inbox) > 0:
+            # any messages we recieve end up in the list pub.inbox. It's the
+            # user's responsibility to empty it to avoid memory issues
+            print pub.inbox.pop()
+
+        print 'daq0: ',i
+
+    sleep(1)
