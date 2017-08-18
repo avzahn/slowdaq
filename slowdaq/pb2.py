@@ -1,6 +1,7 @@
 from . netstring import *
 from . netarray import *
 from . stream import *
+from . snapshot import *
 
 import os
 import json
@@ -20,13 +21,17 @@ class Publisher(Server):
         self.agg_port = agg_port
         self.pid = os.getpid()
 
+        # for display purposes only
+        self.status = 'unset'
+        self.status_color = 'white'
+
         self.add_connection(agg_addr,agg_port)
 
         # listen on any open port
         self.add_listener()
 
         # all messages sent to this instance end up here
-        self.inbox = []
+        self.inbox = deque([],maxlen=128)
 
         self.pulse()
 
@@ -50,14 +55,16 @@ class Publisher(Server):
                 # there should only ever be one listening stream in an instance
                 addr,port = stream.host_location
 
-        d = {'event':'pulse',
-             'name':self.name,
-             'pid':self.pid,
-             'addr':addr,
-             'port':port}
+        e = Entry()
+        e.name = self.name
+        e.pid = str(self.pid)
+        e.addr = addr
+        e.port = port
+        e.status = self.status
+        e.status_color = self.status_color
+        e.systime = utcnow()
 
-        apply_timestamp(d)
-        self.queue(json.dumps(d))
+        self.queue(e.serialize())
         self.t_last_pulse = now()
 
     def handle_recv(self,stream,msgs):
@@ -84,11 +91,9 @@ class Aggregator(Server):
 
         self.fname = fname
         self.data = []
-        self.pulses = []
 
         # setup an initial snapshot
-        self.snapshot = {'event':'snapshot','log':fname,'entries':{}}
-        apply_timestamp(self.snapshot)
+        self.snapshot = Snapshot()
 
     def dump(self):
         """
@@ -117,57 +122,23 @@ class Aggregator(Server):
                 self.data.append(msg)
 
             if m['event'] == 'request_snapshot':
+                # defer working on this at all until after sifting through all
+                # the messages we have for new pulse events
                 do_new_snapshot = True
 
             if m['event'] == 'pulse':
-                self.pulses.append(m)
+                # older pulses from the same source are deleted
+                self.snapshot.add_entry(m)
+
+        # snapshot logging period needs to be faster than three minutes since
+        # we purge anything older than that from it
+        self.snapshot.remove_oldest(datetime.timedelta(minutes=3))
 
         if do_new_snapshot:
-            snapshot = self.update_snapshot()
-            stream.queue(snapshot)
+            stream.queue(self.snapshot.serialize())
 
     def handle_accept(self,stream):
-        stream.queue(json.dumps(self.snapshot))
-
-    def update_snapshot(self):
-        """
-        Modify self.snapshot to reflect any new heartbeat signals found. Also
-        remove anything older than three minutes from self.snapshot
-        """
-
-        entries = self.snapshot['entries']
-
-        while len(self.pulses) > 0:
-
-            p = self.pulses.pop()
-
-            entry = {'systime':p['systime'],
-                     'pid':p['pid'],
-                     'addr':p['addr'],
-                     'port':p['port']}
-
-            name = p['name']
-
-            entries[name] = entry
-
-        # purge anything older than three minutes from the snapshot
-
-        t_cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=3)
-        remove = []
-
-        for name in entries:
-            t_snap = from_timestamp(entries[name]['systime'])
-            if t_snap < t_cutoff:
-                remove.append(name)
-
-        for name in remove:
-            del entries[name]
-
-        self.snapshot['event'] = 'snapshot'
-        self.snapshot['log'] = self.fname
-        apply_timestamp(self.snapshot)
-
-        return json.dumps(self.snapshot)
+        stream.queue(self.snapshot.serialize())
 
 class Subscriber(Server):
     """
@@ -194,13 +165,15 @@ class Subscriber(Server):
 
         self.aggregator = self.add_connection(agg_addr,agg_port)
 
-        self.snapshots = deque([],maxlen=128)
+        self.snapshots = deque([Snapshot()],maxlen=128)
         self.new_snapshot = False
 
         # Will be filled with all data frames recieved. Up to the user to empty.
-        self.data = []
+        self.data = deque([],maxlen=512)
 
         self.index = {}
+
+        self.current_snapshot = None
 
         self.initial_connect = False
 
@@ -218,51 +191,32 @@ class Subscriber(Server):
                 continue
 
             if m['event'] == 'snapshot':
-                self.snapshots.append(m)
+                self.snapshots.append(Snapshot(m))
                 self.new_snapshot = True
 
             if m['event'] == 'data':
                 self.data.append(m)
 
-    def build_index(self):
-        self.index = {}
-        entries = self.snapshots[-1]['entries']
 
-        for name in entries:
-            entry = entries[name]
+    def build_index(self):
+        """
+        Associate every entry in the latest snapshot with a preexisting stream
+        object, or None. Entry objects are hashable, so the index is just an
+        {entry:stream} dict.
+        """
+        self.index = {}
+
+        for e in self.snapshots[-1].entries:
             stream = None
-            remote_location = (entry['addr'],entry['port'])
+            remote_location = (e.addr,e.port)
+
+            self.index[e] = None
 
             for s in self.streams:
                 if s.remote_location == remote_location:
-                    self.index[name] = s
+                    self.index[e] = s
+                    break
 
-    def snapshotdiff(self,s0,s1):
-        """
-        Return lists of addresses to add to and remove from snapshot s0 to form
-        snapshot s1.
-
-        TODO: consider consolidating all the snapshot related work in this
-        module into a snapshot class
-        """
-        addr0 = []
-
-        for name in s0['entries']:
-            entry = s0['entries'][name]
-            addr0.append( (entry['addr'],entry['port']) )
-
-        addr1 = []
-
-        for name in s1['entries']:
-            entry = s1['entries'][name]
-            addr1.append( (entry['addr'],entry['port']) )
-
-        addr0,addr1 = set(addr0),set(addr1)
-
-        add = list(addr1-addr0)
-        remove = list(addr0-addr1)
-
-        return add,remove
 
     def handle_close(self,stream):
         # if we lose a connection, it's safest to ask the aggregator if it's
@@ -270,51 +224,39 @@ class Subscriber(Server):
         self.request_snapshot()
         Server.handle_close(self,stream)
 
-
     def serve(self,timeout=0):
 
         # any snapshots found so far will already be in self.snapshots
 
-        if self.new_snapshot and not self.initial_connect:
-            entries = self.snapshots[-1]['entries']
-            for name in entries:
-                entry = entries[name]
-                self.add_connection(entry['addr'],entry['port'])
-            self.initial_connect = True
-            self.build_index()
+        if len(self.snapshots) == 1:
+            # Connect everything and set current snapshot
+            s = self.snapshots[-1]
+            for e in s.entries:
+                self.add_connection(e.addr,e.port)
+            self.current_snapshot = s
 
-        if self.new_snapshot and self.initial_connect:
+        if len(self.snapshots) > 1:
+            # diff currently connected snapshot with the latest snapshot then
+            # establish connections not in current snapshot and remove
+            # connections not in latest snapshot
+            self.apply_diff(self.current_snapshot - self.snapshots[-1])
+            # latest snapshot is now current
+            self.current_snapshot = self.snapshots[-1]
 
-            if len(self.snapshots) == 1:
-                add = []
-                remove = []
-                entries = self.snapshots[-1]['entries']
-                for name in entries:
-                    entry = entries[name]
-                    add.append((entry['addr'],entry['port']))
-
-            else:
-                s0 = self.snapshots[-2]
-                s1 = self.snapshots[-1]
-                add,remove = self.snapshotdiff(s0,s1)
-
-            self.apply_diff(add,remove)
-            self.new_snapshot = False
-            self.build_index()
-
+        self.build_index()
         self.request_snapshot()
 
         Server.serve(self,timeout)
 
-    def apply_diff(self,add,remove):
+    def apply_diff(self,diff):
 
-        for address in add:
+        for e in diff.add:
             # silently does nothing if address already exists in this instance
-            self.add_connection(*address)
+            self.add_connection(e.addr,e.port)
 
-        for address in remove:
+        for e in diff.remove:
             # silently does nothing if a stream with that address doesn't exist
-            self.remove_connection(*address)
+            self.remove_connection(e.addr,e.port)
 
 
     def message(self,name,msg):

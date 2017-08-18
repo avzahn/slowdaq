@@ -366,6 +366,9 @@ class Server(object):
 
     Special behavior for a particular application is by subclassing this and
     overriding the handle_* callback methods.
+
+    TODO: Handle very old dead connections that have not been removed because
+    they have neither sent a null string nor timed out
     """
 
     def __init__(self, debug=False):

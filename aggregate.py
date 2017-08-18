@@ -10,11 +10,9 @@ while True:
     agg.serve(timeout=5)
     sleep(1)
 
-    agg.update_snapshot()
-
     # displays all slow data scripts or Publishers currently connected
     if not i % 5:
-        print agg.snapshot
+        print str(agg.snapshot)
 
     # write all data to recieved to a file, and then delete it from memory
     agg.dump()

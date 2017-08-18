@@ -8,6 +8,8 @@ from time import sleep
 
 # While pub will listen on a dynamically allocated TCP port, the aggregator
 # location must be known in advance. Each publisher needs to have a unique name.
+# Make sure to not use 'localhost' as an IP address in the field--this will cause
+# the OS to ignore nonlocal connections. Instead, type the machine's IP address.
 pub = Publisher('daq0','localhost',3141)
 
 i = 0
