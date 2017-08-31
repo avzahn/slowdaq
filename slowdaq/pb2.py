@@ -58,6 +58,8 @@ class Publisher(Server):
         e = Entry()
         e.name = self.name
         e.pid = str(self.pid)
+
+        #TODO: are the addr and port actually correct?
         e.addr = addr
         e.port = port
         e.status = self.status
@@ -128,7 +130,10 @@ class Aggregator(Server):
 
             if m['event'] == 'pulse':
                 # older pulses from the same source are deleted
-                self.snapshot.add_entry(m)
+                e = Entry(m)
+                e.remote_addr,e.remote_port = stream.remote_location
+
+                self.snapshot.add_entry(e)
 
         # snapshot logging period needs to be faster than three minutes since
         # we purge anything older than that from it

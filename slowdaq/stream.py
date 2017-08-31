@@ -145,14 +145,15 @@ class Stream(object):
 
         if addr == None:
             addr = gethostbyname(gethostname())
-            self.host_location = (addr,0)
+            host_location = (addr,0)
         else:
-            self.host_location = (addr,port)
+
+            host_location = (addr,port)
 
         s = socket(AF_INET,SOCK_STREAM)
         s.settimeout(0.0)
         s.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-        s.bind(self.host_location)
+        s.bind(host_location)
         s.listen(5)
         self.sock = s
         self.status = 'listening'

@@ -27,11 +27,25 @@ class Entry(object):
 
         self.systime = None
         self.pid = None
-        self.addr = None
+
+        # These are only the addr and port as visible to the local host that created
+        # the Entry. Most likely remote hosts will agree with the port but disagree
+   		# with the address being 127.0.1.1 or similar.
+        self.addr = None 
         self.port = None
+
+        # To be set only by remote users of the Entry's information. Not serialized,
+        # does not affect hash value
+        self.remote_addr = None
+        self.remote_port = None
+
         self.status = None
         self.status_color = 'white'
         self.name = None
+
+
+        self.hashed_names = ['systime','pid','addr','port']
+
 
         if d != None:
             self.deserialize(d)
@@ -44,8 +58,8 @@ class Entry(object):
 
     def __hash__(self):
         h = 0
-        for i in self.dict().items():
-            h += hash(i)
+        for name in self.hashed_names:
+            h += hash(self.__dict__[name])
         return h
 
     def copy(self):
@@ -110,7 +124,13 @@ class Entry(object):
 
         name = colorize(self.name,'cyan')
         pid = str(self.pid)
-        addr = colorize('%s:%s'%(self.addr,self.port),'magenta')
+
+        if self.remote_addr != None:
+        	_addr,_port = self.remote_addr,self.remote_port
+        else:
+        	_addr,port = self.addr, self.port
+
+        addr = colorize('%s:%s'%(_addr,_port),'magenta')
 
         status = '[%s]'% cpad(self.status,8)
         status = colorize(status,self.status_color)
