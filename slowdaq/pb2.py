@@ -2,10 +2,11 @@ from . netstring import *
 from . netarray import *
 from . stream import *
 from . snapshot import *
-
+from . logreader import *
 import os
 import json
 import datetime
+import pandas as pd
 
 class Publisher(Server):
     """
@@ -49,24 +50,10 @@ class Publisher(Server):
         """
         queue a heartbeat signal to send to all clients
         """
-        addr,port = None,None
-        for stream in self.streams:
-            if stream.status == 'listening':
-                # there should only ever be one listening stream in an instance
-                addr,port = stream.host_location
 
-        e = Entry()
-        e.name = self.name
-        e.pid = str(self.pid)
+        p = Pulse(self)
 
-        #TODO: are the addr and port actually correct?
-        e.addr = addr
-        e.port = port
-        e.status = self.status
-        e.status_color = self.status_color
-        e.systime = utcnow()
-
-        self.queue(e.serialize())
+        self.queue(p.serialize())
         self.t_last_pulse = now()
 
     def handle_recv(self,stream,msgs):
@@ -85,30 +72,66 @@ class Aggregator(Server):
     informs Subscribers of how to connect to any active Publishers by itself
     publishing a snapshot of the slowdaq system state.
     """
-    def __init__(self,addr,port,fname,debug=False):
+    def __init__(self,addr,port,logdir,debug=False):
 
         Server.__init__(self,debug)
 
         self.add_listener(addr,port)
 
-        self.fname = fname
         self.data = []
 
         # setup an initial snapshot
         self.snapshot = Snapshot()
 
-    def dump(self):
-        """
-        Append everything in self.data to a file.
+        self.pandas_buffer = {}
+        self.pandas_lines = 0
 
-        TODO: Support new files as old ones become too large
-        TODO: Decide when it is appropriate to a dump a snapshot
+        self.logdir = logdir
+
+        if not os.path.exists(self.logdir):
+            os.makedirs(self.logdir)
+
+    def process_single_data_dict(self,d):
         """
-        with File(self.fname,'a') as f:
+        Insert d into the appropriate pandas dataframe prior to 
+        dataframe logging
+        """
+        name,parsed = process_line(flatten(d))
+        if name in self.pandas_buffer:
+            self.pandas_buffer[name].append(parsed)
+        else:
+            self.pandas_buffer[name] = [parsed]
+
+        self.pandas_lines += 1
+
+    def emit_pandas_log(self):
+        """
+        Note: clears pandas_buffer
+        """
+        for name in self.pandas_buffer:
+            fname = "%s_%s" % (name,timestamp(utcnow(),timestamp_fmt_short))
+            fname = os.path.join(self.logdir,fname)
+            df = pd.DataFrame(self.pandas_buffer[name])
+            df.to_pickle(fname)
+
+        self.pandas_buffer = {}
+        self.pandas_lines = 0
+
+    def log(self):
+        """
+        Note: clears self.data
+        """
+
+        fname = os.path.join(self.logdir,"incremental.log")
+        if os.path.getsize(fname) > 100e6:
+            os.remove(fname)
+            self.emit_pandas_log()
+
+        with File(fname,'a') as f:
             while len(self.data) > 0:
                 msg = self.data.pop()
                 f.write(msg)
-            f.flush()
+            f.flush()            
 
     def handle_recv(self,stream,msgs):
 
@@ -117,11 +140,13 @@ class Aggregator(Server):
         for msg in msgs:
             try:
                 m = json.loads(msg)
+                if m == None: continue
             except:
                 continue
 
             if m['event'] == 'data':
                 self.data.append(msg)
+                self.process_single_data_dict(m)
 
             if m['event'] == 'request_snapshot':
                 # defer working on this at all until after sifting through all
@@ -130,14 +155,17 @@ class Aggregator(Server):
 
             if m['event'] == 'pulse':
                 # older pulses from the same source are deleted
-                e = Entry(m)
-                e.remote_addr,e.remote_port = stream.remote_location
-
-                self.snapshot.add_entry(e)
+                addr,port = stream.remote_location
+                # Recall that the pulse contains only information that the
+                # the publisher has, and that the publisher alone knows
+                # the port it's listening on, but doesn't know the address
+                p = Pulse(m)
+                self.snapshot.update(p,addr)
 
         # snapshot logging period needs to be faster than three minutes since
         # we purge anything older than that from it
-        self.snapshot.remove_oldest(datetime.timedelta(minutes=3))
+        self.snapshot.purge_stale(datetime.timedelta(minutes=3))
+        self.live = self.snapshot.locations
 
         if do_new_snapshot:
             stream.queue(self.snapshot.serialize())
@@ -170,21 +198,37 @@ class Subscriber(Server):
 
         self.aggregator = self.add_connection(agg_addr,agg_port)
 
-        self.snapshots = deque([Snapshot()],maxlen=128)
-        self.new_snapshot = False
-
         # Will be filled with all data frames recieved. Up to the user to empty.
         self.data = deque([],maxlen=512)
 
-        self.index = {}
-
-        self.current_snapshot = None
-
-        self.initial_connect = False
+        self.snapshot = None
 
     def request_snapshot(self):
         d = {'event':'request_snapshot'}
         self.aggregator.queue(json.dumps(d))
+
+    def handle_close(self,stream):
+        # if we lose a connection, it's safest to ask the aggregator if it's
+        # still there before attempting to reconnect
+        self.request_snapshot()
+        Server.handle_close(self,stream)
+
+    def register_snapshot(self,snapshot):
+        """
+        Set the live socket dictionary to a snapshot and make sure all of its
+        entries are connected.
+        """
+
+        self.snapshot = snapshot
+
+        # removal of nonlive connections will be done for us during self.serve
+        self.live = self.snapshot.locations
+
+        for addr,port in self.snapshot.locations:
+            # if already connected, silently does nothing
+
+            stream = self.add_connection(addr,port)
+            self.snapshot.locations[(addr,port)].stream = stream
 
     def handle_recv(self,stream,msgs):
 
@@ -196,83 +240,39 @@ class Subscriber(Server):
                 continue
 
             if m['event'] == 'snapshot':
-                self.snapshots.append(Snapshot(m))
-                self.new_snapshot = True
+
+                self.register_snapshot(Snapshot(m))
+
 
             if m['event'] == 'data':
                 self.data.append(m)
 
 
-    def build_index(self):
-        """
-        Associate every entry in the latest snapshot with a preexisting stream
-        object, or None. Entry objects are hashable, so the index is just an
-        {entry:stream} dict.
-        """
-        self.index = {}
-
-        for e in self.snapshots[-1].entries:
-            stream = None
-            remote_location = (e.addr,e.port)
-
-            self.index[e] = None
-
-            for s in self.streams:
-                if s.remote_location == remote_location:
-                    self.index[e] = s
-                    break
-
-
-    def handle_close(self,stream):
-        # if we lose a connection, it's safest to ask the aggregator if it's
-        # still there before attempting to reconnect
-        self.request_snapshot()
-        Server.handle_close(self,stream)
-
     def serve(self,timeout=0):
-
-        # any snapshots found so far will already be in self.snapshots
-
-        if len(self.snapshots) == 1:
-            # Connect everything and set current snapshot
-            s = self.snapshots[-1]
-            for e in s.entries:
-                self.add_connection(e.addr,e.port)
-            self.current_snapshot = s
-
-        if len(self.snapshots) > 1:
-            # diff currently connected snapshot with the latest snapshot then
-            # establish connections not in current snapshot and remove
-            # connections not in latest snapshot
-            self.apply_diff(self.current_snapshot - self.snapshots[-1])
-            # latest snapshot is now current
-            self.current_snapshot = self.snapshots[-1]
-
-        self.build_index()
         self.request_snapshot()
-
         Server.serve(self,timeout)
-
-    def apply_diff(self,diff):
-
-        for e in diff.add:
-            # silently does nothing if address already exists in this instance
-            self.add_connection(e.addr,e.port)
-
-        for e in diff.remove:
-            # silently does nothing if a stream with that address doesn't exist
-            self.remove_connection(e.addr,e.port)
 
 
     def message(self,name,msg):
-        if name in self.index:
+
+        if self.snapshot == None:
+            return False
+
+        if name in self.snapshot.names:
             if isinstance(msg,dict):
                 msg = json.loads(msg)
-            self.index[name].queue(msg)
-            return True
+
+            try:
+                self.snapshot.names[name].stream.queue(msg)
+                return False
+            except:
+                return False
         else:
             return False
 
 
 class Archiver(Server):
     pass
+
+
+

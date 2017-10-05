@@ -95,8 +95,8 @@ def timestamp(dt=None,fmt=timestamp_fmt):
         dt = datetime.datetime.utcnow()
     return dt.strftime(fmt)
 
-def from_timestamp(stamp):
-    return datetime.datetime.strptime(stamp,timestamp_fmt)
+def from_timestamp(stamp,fmt=timestamp_fmt):
+    return datetime.datetime.strptime(stamp,fmt)
 
 def apply_timestamp(d):
     d['systime'] = timestamp()

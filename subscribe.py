@@ -11,7 +11,7 @@ sub = Subscriber('localhost',3141)
 i = 0
 while True:
 
-    # Send and queued data and recieve any data available.
+    # Send any queued data and recieve any data available.
     sub.serve()
 
     # Queue a string to send to a slow daq script by the unique name it declares
@@ -20,7 +20,13 @@ while True:
     sub.message('daq1','Hello from Subscriber')
 
     if not i % 5:
-        print 'publishers detected=',len(sub.index)
+        # Check that we've recieved a first snapshot
+        if sub.snapshot != None:
+            # print a colorized summary of snapshot information
+            print sub.snapshot.tty_out()
+
+    print sub.live
+    print sub.streams
 
 
     # Strings recieved from publishers end up in sub.data

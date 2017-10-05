@@ -37,4 +37,6 @@ while True:
 
         print 'daq0: ',i
 
+        print pub.streams
+
     sleep(1)

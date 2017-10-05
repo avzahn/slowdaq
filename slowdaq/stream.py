@@ -144,7 +144,8 @@ class Stream(object):
         self.type = 'listen'
 
         if addr == None:
-            addr = gethostbyname(gethostname())
+            #addr = gethostbyname(gethostname())
+            addr = '' # equivalent to INADDR_ANY
             host_location = (addr,0)
         else:
 
@@ -169,7 +170,7 @@ class Stream(object):
         self.type = 'connect'
 
         if addr != None:
-            self.remote_location = (addr,port)
+            self.remote_location = (addr,int(port))
         try:
             s = socket(AF_INET,SOCK_STREAM)
             s.settimeout(1.0)
@@ -206,6 +207,17 @@ class Stream(object):
         self.status = 'closed'
         self.sock.close()
         self.sock = None
+
+    def __del__(self):
+        """
+        Make sure that socket is closed if stream is deleted. Closure
+        is wrapped in a try block in case the socket has already
+        been closed successfully, which is extremely likely.
+        """
+        try:
+            self.close()
+        except:
+            pass
 
     def __repr__(self):
 
@@ -381,6 +393,10 @@ class Server(object):
         self.outbox = deque([])
         self.connecting = []
 
+        # Any stream not in here is removed on the next serve() cycle.
+        # No action is taken if None. Set Externally
+        self.live = None
+
     def queue(self,msg):
         for s in self.streams:
             if s.type != 'listen':
@@ -389,7 +405,8 @@ class Server(object):
     def add_connection(self,addr,port):
         """
         Create new stream and connect() it to address. If connect() fails, queue
-        that new stream to retry on the next serve() call.
+        that new stream to retry on the next serve() call. Always return the
+        stream object created, whether it's connected or not.
         """
 
         # don't add an existing connection
@@ -459,7 +476,28 @@ class Server(object):
         else:
             self.streams.remove(stream)
 
+
+    def purge_dead(self):
+        """
+        Remove any connections not in self.live. Do nothing if
+        self.live is None.
+        """
+        if self.live == None:
+            return
+
+        remove = []
+
+        for s in self.streams:
+            if not s.remote_location in self.live:
+                remove.append(s)
+
+        while len(remove) > 0:
+            s = remove.pop()
+            del s
+
     def serve(self,timeout=0):
+
+        self.purge_dead()
 
         streams = self.streams[:]
 

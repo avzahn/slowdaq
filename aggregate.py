@@ -2,7 +2,7 @@ from slowdaq.pb2 import *
 from time import sleep
 
 # Note that an address of 'localhost' will block remote connections
-agg = Aggregator('localhost',3141,'data.log')
+agg = Aggregator('localhost',3141,logdir='agg')
 
 i = 0
 while True:
@@ -12,9 +12,9 @@ while True:
 
     # displays all slow data scripts or Publishers currently connected
     if not i % 5:
-        print str(agg.snapshot)
+        print agg.snapshot.tty_out()
+    	agg.log()
 
-    # write all data to recieved to a file, and then delete it from memory
-    agg.dump()
+
 
     i += 1
