@@ -2,11 +2,16 @@ from . netstring import *
 from . netarray import *
 from . stream import *
 from . snapshot import *
-from . logreader import *
 import os
 import json
 import datetime
-import pandas as pd
+
+try:
+    # only needed for aggregator and log related functionality
+    import pandas as pd
+    from . logreader import *
+except:
+    pass
 
 class Publisher(Server):
     """

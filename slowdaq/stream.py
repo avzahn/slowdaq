@@ -3,9 +3,6 @@ from collections import deque
 from socket import *
 import errno
 
-
-
-
 import inspect
 def caller():
     return inspect.currentframe().f_back.f_back.f_code.co_name
