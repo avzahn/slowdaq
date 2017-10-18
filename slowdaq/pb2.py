@@ -114,7 +114,7 @@ class Aggregator(Server):
         Note: clears pandas_buffer
         """
         for name in self.pandas_buffer:
-            fname = "%s_%s" % (name,timestamp(utcnow(),timestamp_fmt_short))
+            fname = "%s_%s.pkl" % (name,timestamp(utcnow(),timestamp_fmt_log))
             fname = os.path.join(self.logdir,fname)
             df = pd.DataFrame(self.pandas_buffer[name])
             df.to_pickle(fname)
@@ -129,7 +129,6 @@ class Aggregator(Server):
 
         fname = os.path.join(self.logdir,"incremental.log")
         if os.path.getsize(fname) > 100e6:
-            os.remove(fname)
             self.emit_pandas_log()
 
         with File(fname,'a') as f:
@@ -148,6 +147,10 @@ class Aggregator(Server):
                 if m == None: continue
             except:
                 continue
+
+            if m['event'] == 'emit_log':
+                self.emit_pandas_log()
+                self.log()
 
             if m['event'] == 'data':
                 self.data.append(msg)

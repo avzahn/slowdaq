@@ -86,6 +86,9 @@ timestamp_fmt = '%Y-%m-%d:%H:%M:%S:%f'
 # format for human readable real time monitoring
 timestamp_fmt_short = '%m-%d:%H:%M'
 
+# format for log filenames
+timestamp_fmt_log = '%Y%m%d_%H%M%S'
+
 now = datetime.datetime.utcnow
 
 def timestamp(dt=None,fmt=timestamp_fmt):

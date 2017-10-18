@@ -13,8 +13,6 @@ while True:
     # displays all slow data scripts or Publishers currently connected
     if not i % 5:
         print agg.snapshot.tty_out()
-    	agg.log()
-
-
+        agg.log()
 
     i += 1

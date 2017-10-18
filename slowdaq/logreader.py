@@ -36,10 +36,13 @@ def getDataFrames(fname,recursive=True):
 
     return frames
 
-def flatten(d):
+def flatten(_d,parent=''):
     """
     Recursively expand nested dictionaries that aren't netarray
     """
+    d = {}
+    for key in _d.keys():
+        d[parent+str(key)] = _d[key]
 
     for key in d.keys():
         
@@ -48,7 +51,7 @@ def flatten(d):
         # search for any nested dictionaries
         if isinstance(val,dict):
             if not 'adler32' in val.keys():
-                d.update(flatten(val))
+                d.update(flatten(val,parent=str(key)+'$'))
                 del d[key]
 
     return d
